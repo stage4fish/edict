@@ -22,12 +22,13 @@ import pathlib
 import argparse
 import urllib.request
 import urllib.error
+import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import now_iso, safe_name, read_json
 
-OCLAW_HOME = Path.home() / '.openclaw'
+OCLAW_HOME = Path(os.environ.get('OPENCLAW_STATE_DIR', str(Path.home() / '.openclaw')))
 
 
 def _download_file(url: str, timeout: int = 30, retries: int = 3) -> str:

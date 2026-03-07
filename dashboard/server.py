@@ -25,7 +25,11 @@ from utils import validate_url
 log = logging.getLogger('server')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s', datefmt='%H:%M:%S')
 
-OCLAW_HOME = pathlib.Path.home() / '.openclaw'
+OCLAW_HOME = pathlib.Path(os.environ.get('OPENCLAW_STATE_DIR', str(pathlib.Path.home() / '.openclaw')))
+# edict 专用 gateway 端口（与本地 openclaw gateway 18789 隔离）
+EDICT_GATEWAY_PORT = int(os.environ.get('EDICT_GATEWAY_PORT', '18790'))
+# openclaw profile 名（用于 --profile 参数）
+OPENCLAW_PROFILE = os.environ.get('OPENCLAW_PROFILE', 'edict36')
 MAX_REQUEST_BODY = 1 * 1024 * 1024  # 1 MB
 ALLOWED_ORIGIN = None  # Set via --cors; None means restrict to localhost
 _DEFAULT_ORIGINS = {
@@ -670,20 +674,20 @@ _AGENT_DEPTS = [
 
 
 def _check_gateway_alive():
-    """检测 Gateway 进程是否在运行。"""
+    """检测 edict 专用 Gateway 进程是否在运行（通过端口探测，避免误匹配本地 openclaw gateway）。"""
     try:
-        result = subprocess.run(['pgrep', '-f', 'openclaw-gateway'],
-                                capture_output=True, text=True, timeout=5)
-        return result.returncode == 0
+        import socket
+        with socket.create_connection(('127.0.0.1', EDICT_GATEWAY_PORT), timeout=2):
+            return True
     except Exception:
         return False
 
 
 def _check_gateway_probe():
-    """通过 HTTP probe 检测 Gateway 是否响应。"""
+    """通过 HTTP probe 检测 edict Gateway 是否响应。"""
     try:
         from urllib.request import urlopen
-        resp = urlopen('http://127.0.0.1:18789/', timeout=3)
+        resp = urlopen(f'http://127.0.0.1:{EDICT_GATEWAY_PORT}/', timeout=3)
         return resp.status == 200
     except Exception:
         return False
@@ -833,7 +837,7 @@ def wake_agent(agent_id, message=''):
 
     def do_wake():
         try:
-            cmd = ['openclaw', 'agent', '--agent', runtime_id, '-m', msg, '--timeout', '120']
+            cmd = ['openclaw', '--profile', OPENCLAW_PROFILE, 'agent', '--agent', runtime_id, '-m', msg, '--timeout', '120']
             log.info(f'🔔 唤醒 {agent_id}...')
             # 带重试（最多2次）
             for attempt in range(1, 3):
@@ -1956,7 +1960,7 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
                     'lastDispatchTrigger': trigger,
                 }))
                 return
-            cmd = ['openclaw', 'agent', '--agent', agent_id, '-m', msg,
+            cmd = ['openclaw', '--profile', OPENCLAW_PROFILE, 'agent', '--agent', agent_id, '-m', msg,
                    '--deliver', '--channel', 'feishu', '--timeout', '300']
             max_retries = 2
             err = ''

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """应用 data/pending_model_changes.json → openclaw.json，并重启 Gateway"""
-import json, pathlib, subprocess, datetime, shutil, logging, glob
+import json, pathlib, subprocess, datetime, shutil, logging, glob, os
 from file_lock import atomic_json_write, atomic_json_read
 
 log = logging.getLogger('model_change')
@@ -8,7 +8,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message
 
 BASE = pathlib.Path(__file__).parent.parent
 DATA = BASE / 'data'
-OPENCLAW_CFG = pathlib.Path.home() / '.openclaw' / 'openclaw.json'
+OCLAW_HOME = pathlib.Path(os.environ.get('OPENCLAW_STATE_DIR', str(pathlib.Path.home() / '.openclaw')))
+OPENCLAW_CFG = OCLAW_HOME / 'openclaw.json'
 PENDING = DATA / 'pending_model_changes.json'
 CHANGE_LOG = DATA / 'model_change_log.json'
 MAX_BACKUPS = 10
@@ -83,11 +84,11 @@ def main():
         restart_ok = False
         rollback = False
         try:
-            r = subprocess.run(['openclaw', 'gateway', 'restart'], capture_output=True, text=True, timeout=30)
+            r = subprocess.run(['pm2', 'restart', 'edict-gateway'], capture_output=True, text=True, timeout=30)
             restart_ok = r.returncode == 0
-            log.info(f'gateway restart rc={r.returncode}')
+            log.info(f'pm2 restart edict-gateway rc={r.returncode}')
         except Exception as e:
-            log.error(f'gateway restart failed: {e}')
+            log.error(f'pm2 restart edict-gateway failed: {e}')
             # 回滚配置
             if bak.exists():
                 shutil.copy2(bak, OPENCLAW_CFG)

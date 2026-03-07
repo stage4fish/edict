@@ -5,8 +5,11 @@
 set -e
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OC_HOME="$HOME/.openclaw"
+OPENCLAW_PROFILE="${OPENCLAW_PROFILE:-edict36}"
+OC_HOME="$HOME/.openclaw-${OPENCLAW_PROFILE}"
 OC_CFG="$OC_HOME/openclaw.json"
+OPENCLAW_STATE_DIR="$OC_HOME"
+EDICT_GATEWAY_PORT="${EDICT_GATEWAY_PORT:-18790}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -40,11 +43,13 @@ check_deps() {
   fi
   log "Python3: $(python3 --version)"
 
-  if [ ! -f "$OC_CFG" ]; then
-    error "未找到 openclaw.json。请先运行 openclaw 完成初始化。"
+  # 检查主 openclaw 是否已初始化（需要 credentials）
+  if [ ! -f "$HOME/.openclaw/openclaw.json" ]; then
+    error "未找到 ~/.openclaw/openclaw.json。请先运行 openclaw 完成初始化。"
     exit 1
   fi
-  log "openclaw.json: $OC_CFG"
+  log "主 openclaw 配置: $HOME/.openclaw/openclaw.json"
+  info "edict 将使用独立 profile: --profile ${OPENCLAW_PROFILE} (${OC_HOME})"
 }
 
 # ── Step 0.5: 备份已有 Agent 数据 ──────────────────────────────
@@ -122,16 +127,38 @@ AGENTS_EOF
 
 # ── Step 2: 注册 Agents ─────────────────────────────────────
 register_agents() {
-  info "注册三省六部 Agents..."
+  info "注册三省六部 Agents (profile: ${OPENCLAW_PROFILE})..."
+
+  # 初始化隔离 profile 的 openclaw.json（若不存在则从主配置复制 credentials/models 部分）
+  if [ ! -f "$OC_CFG" ]; then
+    info "初始化 ${OC_HOME}/openclaw.json ..."
+    mkdir -p "$OC_HOME"
+    python3 << PYEOF_INIT
+import json, pathlib, os
+src = pathlib.Path.home() / '.openclaw' / 'openclaw.json'
+dst = pathlib.Path(os.environ['OC_HOME']) / 'openclaw.json'
+src_cfg = json.loads(src.read_text())
+# 只复制 credentials/models/gateway 基础配置，不复制 agents
+new_cfg = {}
+for k in ('meta', 'auth', 'models', 'gateway', 'tools', 'messages', 'commands', 'session', 'hooks', 'channels', 'skills', 'plugins', 'env', 'wizard'):
+    if k in src_cfg:
+        new_cfg[k] = src_cfg[k]
+# 覆盖 gateway 端口为 edict 专用端口
+new_cfg.setdefault('gateway', {})['port'] = int(os.environ.get('EDICT_GATEWAY_PORT', '18790'))
+new_cfg['agents'] = {'defaults': src_cfg.get('agents', {}).get('defaults', {}), 'list': []}
+dst.write_text(json.dumps(new_cfg, ensure_ascii=False, indent=2))
+print(f'初始化完成: {dst}')
+PYEOF_INIT
+  fi
 
   # 备份配置
   cp "$OC_CFG" "$OC_CFG.bak.sansheng-$(date +%Y%m%d-%H%M%S)"
   log "已备份配置: $OC_CFG.bak.*"
 
-  python3 << 'PYEOF'
-import json, pathlib, sys
+  python3 << PYEOF
+import json, pathlib, sys, os
 
-cfg_path = pathlib.Path.home() / '.openclaw' / 'openclaw.json'
+cfg_path = pathlib.Path(os.environ['OC_HOME']) / 'openclaw.json'
 cfg = json.loads(cfg_path.read_text())
 
 AGENTS = [
@@ -155,7 +182,7 @@ existing_ids = {a['id'] for a in agents_list}
 added = 0
 for ag in AGENTS:
     ag_id = ag['id']
-    ws = str(pathlib.Path.home() / f'.openclaw/workspace-{ag_id}')
+    ws = str(pathlib.Path(os.environ['OC_HOME']) / f'workspace-{ag_id}')
     if ag_id not in existing_ids:
         entry = {'id': ag_id, 'workspace': ws, **{k:v for k,v in ag.items() if k!='id'}}
         agents_list.append(entry)
@@ -254,20 +281,77 @@ first_sync() {
   info "执行首次数据同步..."
   cd "$REPO_DIR"
   
-  REPO_DIR="$REPO_DIR" python3 scripts/sync_agent_config.py || warn "sync_agent_config 有警告"
+  REPO_DIR="$REPO_DIR" OPENCLAW_STATE_DIR="$OPENCLAW_STATE_DIR" python3 scripts/sync_agent_config.py || warn "sync_agent_config 有警告"
   python3 scripts/refresh_live_data.py || warn "refresh_live_data 有警告"
   
   log "首次同步完成"
 }
 
-# ── Step 6: 重启 Gateway ────────────────────────────────────
-restart_gateway() {
-  info "重启 OpenClaw Gateway..."
-  if openclaw gateway restart 2>/dev/null; then
-    log "Gateway 重启成功"
-  else
-    warn "Gateway 重启失败，请手动重启：openclaw gateway restart"
+# ── Step 6: 生成 pm2 配置并启动 ─────────────────────────────
+setup_pm2() {
+  info "配置 pm2 进程管理..."
+
+  # 生成 ecosystem.config.cjs（动态填入实际路径）
+  cat > "$REPO_DIR/ecosystem.config.cjs" << ECOSYSTEM_EOF
+module.exports = {
+  apps: [
+    {
+      name: 'edict-gateway',
+      script: 'openclaw',
+      args: '--profile ${OPENCLAW_PROFILE} gateway run --port ${EDICT_GATEWAY_PORT}',
+      watch: false,
+      autorestart: true,
+      max_restarts: 10,
+      restart_delay: 3000,
+      env: {
+        OPENCLAW_STATE_DIR: '${OPENCLAW_STATE_DIR}',
+      },
+    },
+    {
+      name: 'edict-dashboard',
+      script: 'dashboard/server.py',
+      interpreter: 'python3',
+      args: '--port 7891',
+      cwd: '${REPO_DIR}',
+      watch: false,
+      autorestart: true,
+      max_restarts: 10,
+      restart_delay: 2000,
+      env: {
+        OPENCLAW_STATE_DIR: '${OPENCLAW_STATE_DIR}',
+      },
+    },
+    {
+      name: 'edict-loop',
+      script: 'scripts/run_loop.sh',
+      interpreter: 'bash',
+      cwd: '${REPO_DIR}',
+      watch: false,
+      autorestart: true,
+      max_restarts: 10,
+      restart_delay: 5000,
+      env: {
+        OPENCLAW_STATE_DIR: '${OPENCLAW_STATE_DIR}',
+      },
+    },
+  ],
+};
+ECOSYSTEM_EOF
+
+  log "ecosystem.config.cjs 已生成: $REPO_DIR/ecosystem.config.cjs"
+
+  if ! command -v pm2 &>/dev/null; then
+    warn "未找到 pm2，请先安装: npm install -g pm2"
+    warn "安装后运行: cd $REPO_DIR && pm2 start ecosystem.config.cjs"
+    return
   fi
+
+  cd "$REPO_DIR"
+  # 停止已有的同名进程（避免重复启动）
+  pm2 delete edict-gateway edict-dashboard edict-loop 2>/dev/null || true
+  pm2 start ecosystem.config.cjs
+  pm2 save
+  log "pm2 进程已启动"
 }
 
 # ── Main ────────────────────────────────────────────────────
@@ -279,16 +363,24 @@ register_agents
 init_data
 build_frontend
 first_sync
-restart_gateway
+setup_pm2
 
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║  🎉  三省六部安装完成！                          ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
-echo "下一步："
-echo "  1. 启动数据刷新循环:  bash scripts/run_loop.sh &"
-echo "  2. 启动看板服务器:    python3 dashboard/server.py"
-echo "  3. 打开看板:          http://127.0.0.1:7891"
+echo "Profile 隔离目录: ${OC_HOME}"
+echo "edict Gateway 端口: ${EDICT_GATEWAY_PORT} (本地 openclaw: 18789, 互不干扰)"
+echo ""
+echo "pm2 常用命令："
+echo "  pm2 list                    查看所有进程状态"
+echo "  pm2 logs edict-dashboard    查看看板日志"
+echo "  pm2 logs edict-loop         查看数据刷新日志"
+echo "  pm2 logs edict-gateway      查看 Gateway 日志"
+echo "  pm2 restart edict-gateway   重启 Gateway"
+echo "  pm2 stop all                停止所有 edict 进程"
+echo ""
+echo "打开看板: http://127.0.0.1:7891"
 echo ""
 info "文档: docs/getting-started.md"

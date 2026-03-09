@@ -133,7 +133,7 @@ register_agents() {
   if [ ! -f "$OC_CFG" ]; then
     info "初始化 ${OC_HOME}/openclaw.json ..."
     mkdir -p "$OC_HOME"
-    python3 << PYEOF_INIT
+    OC_HOME="$OC_HOME" EDICT_GATEWAY_PORT="$EDICT_GATEWAY_PORT" python3 << PYEOF_INIT
 import json, pathlib, os
 src = pathlib.Path.home() / '.openclaw' / 'openclaw.json'
 dst = pathlib.Path(os.environ['OC_HOME']) / 'openclaw.json'
@@ -155,7 +155,7 @@ PYEOF_INIT
   cp "$OC_CFG" "$OC_CFG.bak.sansheng-$(date +%Y%m%d-%H%M%S)"
   log "已备份配置: $OC_CFG.bak.*"
 
-  python3 << PYEOF
+  OC_HOME="$OC_HOME" python3 << PYEOF
 import json, pathlib, sys, os
 
 cfg_path = pathlib.Path(os.environ['OC_HOME']) / 'openclaw.json'
@@ -276,6 +276,30 @@ build_frontend() {
   fi
 }
 
+# ── Step 4.5: 复制 API 认证配置到各 Agent ───────────────────
+sync_auth_profiles() {
+  info "同步 API 认证配置到各 Agent..."
+
+  # 从主 openclaw 的 main agent 获取 auth-profiles.json
+  SRC_AUTH="$HOME/.openclaw/agents/main/agent/auth-profiles.json"
+
+  if [ ! -f "$SRC_AUTH" ]; then
+    warn "未找到主 openclaw 的 auth-profiles.json ($SRC_AUTH)，跳过"
+    warn "请手动运行: openclaw --profile ${OPENCLAW_PROFILE} agents add <id>"
+    return
+  fi
+
+  AGENTS=(taizi zhongshu menxia shangshu hubu libu bingbu xingbu gongbu libu_hr zaochao)
+  synced=0
+  for agent in "${AGENTS[@]}"; do
+    dir="$OC_HOME/agents/$agent/agent"
+    mkdir -p "$dir"
+    cp "$SRC_AUTH" "$dir/auth-profiles.json"
+    synced=$((synced + 1))
+  done
+  log "已同步 auth-profiles.json 到 ${synced} 个 agents"
+}
+
 # ── Step 5: 首次数据同步 ────────────────────────────────────
 first_sync() {
   info "执行首次数据同步..."
@@ -297,8 +321,8 @@ module.exports = {
   apps: [
     {
       name: 'edict-gateway',
-      script: 'openclaw',
-      args: '--profile ${OPENCLAW_PROFILE} gateway run --port ${EDICT_GATEWAY_PORT}',
+      script: '/bin/bash',
+      args: '-c "exec $(which openclaw) --profile ${OPENCLAW_PROFILE} gateway run --port ${EDICT_GATEWAY_PORT}"',
       watch: false,
       autorestart: true,
       max_restarts: 10,
@@ -362,6 +386,7 @@ create_workspaces
 register_agents
 init_data
 build_frontend
+sync_auth_profiles
 first_sync
 setup_pm2
 

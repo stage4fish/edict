@@ -141,7 +141,7 @@ function EdictCard({ task }: { task: Task }) {
         {canResume && (
           <button className="mini-act" onClick={(e) => handleAction('resume', e)}>▶ 恢复</button>
         )}
-        {archived && !task.archived && (
+        {!task.archived && ['Done', 'Cancelled'].includes(task.state) && (
           <button className="mini-act" onClick={handleArchive}>📦 归档</button>
         )}
         {task.archived && (

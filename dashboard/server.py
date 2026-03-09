@@ -609,14 +609,18 @@ def handle_review_action(task_id, action, comment=''):
     task = next((t for t in tasks if t.get('id') == task_id), None)
     if not task:
         return {'ok': False, 'error': f'任务 {task_id} 不存在'}
-    if task.get('state') not in ('Review', 'Menxia'):
-        return {'ok': False, 'error': f'任务 {task_id} 当前状态为 {task.get("state")}，无法御批'}
+    old_state = task.get('state', '')
+    if old_state not in ('Review', 'Menxia'):
+        return {'ok': False, 'error': f'任务 {task_id} 当前状态为 {old_state}，无法御批'}
 
     _ensure_scheduler(task)
     _scheduler_snapshot(task, f'review-before-{action}')
 
+    # 根据原始状态确定 from_dept（在修改 task['state'] 之前）
+    from_dept = '门下省' if old_state == 'Menxia' else '尚书省'
+
     if action == 'approve':
-        if task['state'] == 'Menxia':
+        if old_state == 'Menxia':
             task['state'] = 'Assigned'
             task['now'] = '门下省准奏，移交尚书省派发'
             remark = f'✅ 准奏：{comment or "门下省审议通过"}'
@@ -638,7 +642,7 @@ def handle_review_action(task_id, action, comment=''):
 
     task.setdefault('flow_log', []).append({
         'at': now_iso(),
-        'from': '门下省' if task.get('state') != 'Done' else '皇上',
+        'from': from_dept,
         'to': to_dept,
         'remark': remark
     })

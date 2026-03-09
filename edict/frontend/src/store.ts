@@ -31,7 +31,7 @@ export const PIPE = [
 
 export const PIPE_STATE_IDX: Record<string, number> = {
   Inbox: 0, Pending: 0, Taizi: 1, Zhongshu: 2, Menxia: 3,
-  Assigned: 4, Doing: 5, Review: 6, Done: 7, Blocked: 5, Cancelled: 5, Next: 4,
+  Assigned: 4, Next: 4, Doing: 5, Review: 6, Done: 7, Blocked: 5, Cancelled: 7,
 };
 
 export const DEPT_COLOR: Record<string, string> = {
@@ -66,13 +66,17 @@ export function isSession(t: Task): boolean {
 }
 
 export function isArchived(t: Task): boolean {
-  return t.archived || ['Done', 'Cancelled'].includes(t.state);
+  return !!t.archived;
 }
 
 export type PipeStatus = { key: string; dept: string; icon: string; action: string; status: 'done' | 'active' | 'pending' };
 
 export function getPipeStatus(t: Task): PipeStatus[] {
-  const stateIdx = PIPE_STATE_IDX[t.state] ?? 4;
+  let effectiveState = t.state;
+  if (t.state === 'Blocked' && t._prev_state) {
+    effectiveState = t._prev_state;
+  }
+  const stateIdx = PIPE_STATE_IDX[effectiveState] ?? PIPE_STATE_IDX[t.state] ?? 4;
   return PIPE.map((stage, i) => ({
     ...stage,
     status: (i < stateIdx ? 'done' : i === stateIdx ? 'active' : 'pending') as 'done' | 'active' | 'pending',
